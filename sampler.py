@@ -6,7 +6,7 @@ import numpy as np
 import scipy.special
 import torch
 import torch.nn as nn
-from scipy.stats import poisson, uniform
+from scipy.stats import poisson, uniform, dirichlet
 from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForMaskedLM
@@ -261,6 +261,75 @@ class SentenceSampler:
         masked_sentence = self.get_masked_sentence(inputs["input_ids"], covariance, sample_span, sample_action, replacement_lambda)
         sampled_sentence = self.sample_masked_sentence(masked_sentence, inputs["attention_mask"], temperature)
         return sampled_sentence
+
+    def interpolate_states(
+        self,
+        src_embs: Tensor,
+        tgt_embs: Tensor,
+        mask_span: List[int],
+        aggregate_method: str="local",
+        interpolate_method: str="linear"
+    ):
+        """
+        interpolate between source and target embeddings (contextual or static)
+        :param src_embs: 1 x S x E embedding matrix
+        :param tgt_embs: 1 x T x E embedding matrix
+        :param aggregate_method: one of {closest, local, global}
+            closest: round to closest
+        :param interpolate_method: one of {linear, exp, polar}
+        :return: embedding matrix same shape as src_emb
+        """
+        src_len = src_embs.shape[1] - 2
+        tgt_len = src_embs.shape[1] - 2
+        new_src_embs = src_embs.clone()
+        for src_idx in range(mask_span[0], mask_span[1]+1):
+            tgt_idx = src_idx / src_len * tgt_len
+            # TODO aggregation could also just sample an index
+            if aggregate_method == "closest":
+                tgt_emb = tgt_embs[0, round(tgt_idx)]
+            elif aggregate_method == "local":
+                tgt_idx_int = np.floor(tgt_idx)
+                frac = tgt_idx - tgt_idx_int
+                tgt_emb = self.interpolate(
+                    embs=tgt_embs[0, tgt_idx_int:tgt_idx_int+1],
+                    method=interpolate_method,
+                    weights=torch.tensor([1-frac, frac])
+                )
+            elif aggregate_method == "global":
+                alpha = torch.tensor([np.abs(i-tgt_idx) for i in range(tgt_len)])
+                tgt_emb = self.interpolate(
+                    embs=tgt_embs[0, 1:-1],
+                    method=interpolate_method,
+                    weights=alpha
+                )
+            else:
+                raise NotImplementedError(f"aggregation method={aggregate_method} not implemented")
+            mix_emb = self.interpolate(
+                embs=torch.cat([src_embs[0, tgt_emb], tgt_emb]),
+                method=interpolate_method,
+                weights=torch.tensor([0.5, 0.5])
+            )
+            new_src_embs[src_idx] = mix_emb
+        return new_src_embs
+
+    def interpolate(self, embs: Tensor, method: str="linear", weights: Optional[Tensor]=None):
+        if weights is None:
+            if method == "polar":
+                # polar or dirchlet polar: https://aclanthology.org/2022.aacl-short.50.pdf
+                # here we treat weights as concentration alpha
+                weights = torch.tensor(dirichlet.rvs(weights, size=1))
+            else:
+                weights = torch.ones(len(embs))/len(embs)
+        assert sum(weights) == 1
+        if method == "linear":
+            return embs*weights.sum(dim=0)
+        elif method == "exp":
+            return torch.prod(torch.pow(embs, weights), dim=0)
+        elif method == "polar":
+            return embs*torch.sqrt(weights).sum(dim=0)
+        else:
+            raise NotImplementedError(f"interpolation method={method} not implemented")
+
 
 
 class MetropolisHastingSentenceSampler:
