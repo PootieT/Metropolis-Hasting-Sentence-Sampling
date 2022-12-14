@@ -12,4 +12,12 @@ Sampling / Interpolating sentence using transformers with Metropolis-Hasting lik
   - average word embeddings
   - randomly inject target sentence words
   - mask target sentence, infuse with source sentence (word swap, logit average)
-  - 
+
+- if embedding interpolation doesn't work well, would be cool to do case study, see cases of such interpolation (probing word classifier)
+  - emb-closest-exp interpolation does not work well, produces <s> tokens
+  - emb-global/local-polar doesn't work well, especially global, i think you can't interpolate in hidden space too much before anisotropy hits
+
+- fusion in logits
+  - works! with closest-polar + dirchlet sampling, quiet nice
+  - global does not work as well, too much noise i think
+  - local/closest + linear/polar works well

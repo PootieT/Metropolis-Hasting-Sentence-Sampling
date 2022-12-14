@@ -11,17 +11,19 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausal
 class ProposalAcceptor:
     def __init__(
         self,
-        semantic_model_name: Optional[str]=None,
-        fluency_model_name: Optional[str]=None,
-        lambda_semantic: float=0.5
+        semantic_model_name: Optional[str] = None,
+        fluency_model_name: Optional[str] = None,
+        lambda_semantic: float = 1.0,
+        lambda_fluency: float = 1.0,
     ):
         self.semantic_model = SentenceTransformer(semantic_model_name)
         self.ppl_tokenizer = AutoTokenizer.from_pretrained(fluency_model_name)
         self.ppl_lm = AutoModelForCausalLM.from_pretrained(fluency_model_name)
         if self.ppl_tokenizer.pad_token is None:
-            self.ppl_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            self.ppl_tokenizer.add_special_tokens({"pad_token": "[PAD]"})
         self.tgt_sem_emb = None
         self.lambda_semantic = lambda_semantic
+        self.lambda_fluency = lambda_fluency
         self.cur_sem_logprob = None
         self.cur_logprob = None
 
@@ -31,7 +33,7 @@ class ProposalAcceptor:
     def calculate_semantic_similarity(self, sentence: str) -> Tensor:
         assert self.tgt_sem_emb is not None, "Run set_target_sentence first!"
         emb = self.semantic_model.encode(sentence)
-        sem_sim = cosine_similarity(emb.reshape(1,-1), self.tgt_sem_emb.reshape(1,-1))[0][0]
+        sem_sim = cosine_similarity(emb.reshape(1, -1), self.tgt_sem_emb.reshape(1, -1))[0][0]
         return torch.tensor(sem_sim)
 
     def calculate_lm_logprob(self, sentence: List[str], stride: int = 512) -> Tensor:
@@ -54,7 +56,9 @@ class ProposalAcceptor:
             target_ids[target_ids == self.ppl_tokenizer.vocab[self.ppl_tokenizer.pad_token]] = -100
             # switch it to EOS because model word embedding doesn't have EOS. As long as label is -100 what token it
             # switches to doesn't impact performance
-            input_ids[input_ids == self.ppl_tokenizer.vocab[self.ppl_tokenizer.pad_token]] = self.ppl_tokenizer.eos_token_id
+            input_ids[
+                input_ids == self.ppl_tokenizer.vocab[self.ppl_tokenizer.pad_token]
+            ] = self.ppl_tokenizer.eos_token_id
 
             with torch.no_grad():
                 # instead of taking aggregated cross entropy from causal LM, we calculate
@@ -87,16 +91,20 @@ class ProposalAcceptor:
             self.cur_logprob = logprob
             return None
         else:
-            accptance = self.lambda_semantic * torch.exp(sem_logprob - self.cur_sem_logprob) + \
-                        (1-self.lambda_semantic) * torch.exp(logprob - self.cur_logprob)
+            # accptance = self.lambda_semantic * torch.exp(
+            #     (sem_logprob - self.cur_sem_logprob) * self.hill_climb_scalar
+            # ) + (1 - self.lambda_semantic) * torch.exp((logprob - self.cur_logprob) * self.hill_climb_scalar)
+            accptance = torch.exp(
+                (sem_logprob - self.cur_sem_logprob) * self.lambda_semantic +
+                (logprob - self.cur_logprob) * self.lambda_fluency)
             return sem_logprob, logprob, accptance
 
 
 if __name__ == "__main__":
     acceptor = ProposalAcceptor(
         target_sentence="My cate is cute",
-        semantic_model_name='sentence-transformers/all-MiniLM-L6-v2',
-        fluency_model_name="distilgpt2"
+        semantic_model_name="sentence-transformers/all-MiniLM-L6-v2",
+        fluency_model_name="distilgpt2",
     )
     s1 = "new york city smells bad"
     s2 = "my dog is a cutie"

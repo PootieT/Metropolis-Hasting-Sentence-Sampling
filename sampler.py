@@ -3,6 +3,7 @@ from typing import *
 import random
 
 import numpy as np
+import pandas as pd
 import scipy.special
 import torch
 import torch.nn as nn
@@ -17,7 +18,7 @@ COSINE = lambda x, y: (1 - nn.CosineSimilarity(dim=-1)(x.unsqueeze(1), y.unsquee
 
 
 class SentenceSampler:
-    def __init__(self, generator_model_name:str):
+    def __init__(self, generator_model_name: str):
         self.tokenizer = AutoTokenizer.from_pretrained(generator_model_name)
         self.model = AutoModelForMaskedLM.from_pretrained(generator_model_name)
 
@@ -30,11 +31,7 @@ class SentenceSampler:
         end = -1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids)
         return C[start:end, start:end]
 
-    def get_static_word_covariance(
-        self,
-        input_ids: Tensor,
-        attention_mask: Tensor
-    ):
+    def get_static_word_covariance(self, input_ids: Tensor, attention_mask: Tensor):
         static_embs = self.model.bert.embeddings(input_ids).squeeze(0)  # assume input is one sentence at a time
         cos_sim = 1 - COSINE(static_embs, static_embs)
 
@@ -60,15 +57,11 @@ class SentenceSampler:
         end = -1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids)
         return cos_sim[start:end, start:end]
 
-    def get_one_pass_perturbed_masking_word_covariance(
-        self,
-        input_ids: Tensor,
-        attention_mask: Tensor
-    ) -> Tensor:
-        """ mask each word, calculate change in rest of words' hidden state """
+    def get_one_pass_perturbed_masking_word_covariance(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        """mask each word, calculate change in rest of words' hidden state"""
         n = input_ids[0].shape[0]
         start = 1 if input_ids[0][0] == self.tokenizer.cls_token_id else 0
-        end = len(input_ids[0])-1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids[0])
+        end = len(input_ids[0]) - 1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids[0])
 
         contextual_embs = (
             self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
@@ -78,21 +71,19 @@ class SentenceSampler:
             masked_input_ids = input_ids.clone()
             masked_input_ids[0][i] = self.tokenizer.mask_token_id
             masked_contextual_embs = (
-                self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
+                self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                .hidden_states[-1]
+                .squeeze(0)
             )
             # larger impact a masked token has on rest of the token, the smaller the similarity
             covariance[i, :] = 1 - nn.CosineSimilarity(dim=-1)(contextual_embs, masked_contextual_embs)
-
 
         ind = np.diag_indices(covariance.shape[0])
         covariance[ind[0], ind[1]] = 1
         return covariance[start:end, start:end]
 
     def get_perturbed_masking_word_covariance(
-        self,
-        input_ids: Tensor,
-        attention_mask: Tensor,
-        adjacent_only: bool=False
+        self, input_ids: Tensor, attention_mask: Tensor, adjacent_only: bool = False
     ) -> Tensor:
         n = input_ids[0].shape[0]
         start = 1 if input_ids[0][0] == self.tokenizer.cls_token_id else 0
@@ -102,25 +93,32 @@ class SentenceSampler:
         for i in range(start, end):
             masked_input_ids = input_ids.clone()
             masked_input_ids[0][i] = self.tokenizer.mask_token_id
-            masked_contextual_embs = self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
-            j_range = [i-1, i+1] if adjacent_only else range(start, end)
+            masked_contextual_embs = (
+                self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                .hidden_states[-1]
+                .squeeze(0)
+            )
+            j_range = [i - 1, i + 1] if adjacent_only else range(start, end)
             for j in j_range:
                 if j != i:
                     masked_2_input_ids = masked_input_ids.clone()
                     masked_2_input_ids[0][j] = self.tokenizer.mask_token_id
-                    masked_2_contextual_embs = self.model(masked_2_input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
-                    covariance[i, j] = 1 - nn.CosineSimilarity(dim=-1)(masked_contextual_embs[i], masked_2_contextual_embs[i])
+                    masked_2_contextual_embs = (
+                        self.model(masked_2_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                        .hidden_states[-1]
+                        .squeeze(0)
+                    )
+                    covariance[i, j] = 1 - nn.CosineSimilarity(dim=-1)(
+                        masked_contextual_embs[i], masked_2_contextual_embs[i]
+                    )
 
             if adjacent_only:  # sum diagonals as average of I(i, j-1) and I(i, j+1)
-                covariance[i, i] = (covariance[i, i-1] + covariance[i, i+1]) / 2
+                covariance[i, i] = (covariance[i, i - 1] + covariance[i, i + 1]) / 2
 
         return covariance[start:end, start:end]
 
     def calculate_higher_order_span_score(
-        self,
-        C: Tensor,
-        single_word_logit_penalty: float = 1.0,
-        higher_order_penalty: float = 0.8
+        self, C: Tensor, single_word_logit_penalty: float = 1.0, higher_order_penalty: float = 0.8
     ) -> Tensor:
         n = C.shape[0]
 
@@ -151,7 +149,7 @@ class SentenceSampler:
         self,
         input_ids: List[int],
         attention_mask: List[int],
-        method: str="static",
+        method: str = "static",
     ) -> Tensor:
         """
         factory method to obtain covariance between words
@@ -173,7 +171,7 @@ class SentenceSampler:
             "mixed": self.get_weighted_static_contextual_word_covariance,
             "mask_one": self.get_one_pass_perturbed_masking_word_covariance,
             "mask_two": self.get_perturbed_masking_word_covariance,
-            "mask_two_adjacent": self.get_perturbed_masking_word_covariance
+            "mask_two_adjacent": self.get_perturbed_masking_word_covariance,
         }
         kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
         if method == "mask_two_adjacent":
@@ -186,8 +184,8 @@ class SentenceSampler:
         input_ids: List[int],
         covariance: Tensor,
         sample_span: bool = True,
-        action: Optional[str]=None,
-        replacement_lambda: Optional[float]=None,
+        action: Optional[str] = None,
+        replacement_lambda: Optional[float] = None,
     ) -> List[int]:
         """
         :param input_ids: input sentence tokens, 1 X n
@@ -206,10 +204,10 @@ class SentenceSampler:
             indices = torch.tril_indices(n, n)
             p_spans = torch.softmax(covariance[indices], dim=0)
             span_idx = p_spans.multinomial(num_samples=1, replacement=True)
-            i = np.floor(np.sqrt(0.25+2*span_idx) - 0.5)
-            triangular_num = i*(i+1)/2
+            i = np.floor(np.sqrt(0.25 + 2 * span_idx) - 0.5)
+            triangular_num = i * (i + 1) / 2
             j = span_idx - triangular_num
-            mask_span = [min(i,j), max(i,j)]
+            mask_span = [min(i, j), max(i, j)]
         else:
             # sample only from diagonals
             p_tokens = torch.softmax(torch.diag(covariance), dim=0)
@@ -219,68 +217,68 @@ class SentenceSampler:
 
         if action is not None:
             # TODO be careful of bos/eos index
-            mask_len = mask_span[1]-mask_span[0] + 1
+            mask_len = mask_span[1] - mask_span[0] + 1
             if action == "sub":
-                input_ids[mask_span[0]:mask_span[1]+1] = torch.tensor([mask_token_id]*mask_len)
+                input_ids[mask_span[0] : mask_span[1] + 1] = torch.tensor([mask_token_id] * mask_len)
             elif action == "del":
-                input_ids = torch.cat([input_ids[:mask_span[0]], input_ids[mask_span[1]+1:]])
+                input_ids = torch.cat([input_ids[: mask_span[0]], input_ids[mask_span[1] + 1 :]])
             elif action == "ins":
-                input_ids = torch.cat([input_ids[:mask_span[0]], torch.tensor([mask_token_id]*(mask_len+1)),
-                                       input_ids[mask_span[1]+1:]])
+                input_ids = torch.cat(
+                    [
+                        input_ids[: mask_span[0]],
+                        torch.tensor([mask_token_id] * (mask_len + 1)),
+                        input_ids[mask_span[1] + 1 :],
+                    ]
+                )
             else:
                 raise NotImplementedError
         else:  # sampling
             sampled_len = poisson.rvs(scale=replacement_lambda)
-            input_ids = input_ids[:mask_span[0]] + [mask_token_id]*sampled_len +input_ids[mask_span[-1]+1:]
+            input_ids = input_ids[: mask_span[0]] + [mask_token_id] * sampled_len + input_ids[mask_span[-1] + 1 :]
         return input_ids.unsqueeze(0)
 
     def sample_masked_sentence(
         self,
-        input_ids:List[str],
-        temperature: float=1.0,
-        cls_emb: Optional[Tensor]=None,
+        input_ids: List[str],
+        temperature: float = 1.0,
+        tgt_embs: Optional[Tensor] = None,
+        tgt_logits: Optional[Tensor] = None,
+        fusion_aggregation: str = "closest",
+        fusion_interpolation: str = "linear",
     ) -> str:
-        if cls_emb is not None:
+        assert not (tgt_embs is not None and tgt_logits is not None), "only one type of fusion at a time"
+        mask_token_index = np.argwhere(input_ids == self.tokenizer.mask_token_id)[1]
+        if len(mask_token_index) == 0:
+            return self.tokenizer.decode(input_ids[0][1:-1])
+
+        mask_span = [min(mask_token_index), max(mask_token_index)]
+
+        if tgt_embs is not None:
             input_embs = self.model.base_model.embeddings(input_ids)
-            input_embs[0, 0] = cls_emb
+            input_embs = self.interpolate_states(
+                input_embs, tgt_embs, mask_span, fusion_aggregation, fusion_interpolation
+            )
             token_logits = self.model(inputs_embeds=input_embs, attention_mask=torch.ones_like(input_ids)).logits
         else:
             token_logits = self.model(input_ids, attention_mask=torch.ones_like(input_ids)).logits
-        # Find the location of [MASK] and extract its logits
-        mask_token_index = np.argwhere(input_ids == self.tokenizer.mask_token_id)[1]
+
+        if tgt_logits is not None:
+            token_logits = self.interpolate_states(
+                token_logits, tgt_logits, mask_span, fusion_aggregation, fusion_interpolation
+            )
+
         mask_token_logits = token_logits[0, mask_token_index, :]
         mask_token_logits = torch.softmax(mask_token_logits / temperature, dim=1)
         input_ids[0, mask_token_index] = torch.multinomial(mask_token_logits, 1, replacement=True).squeeze(1)
         return self.tokenizer.decode(input_ids[0][1:-1])
-
-    def sample(
-        self,
-        sentence: str,
-        covariance_method: str="random",
-        sample_span: bool=False,
-        single_word_penalty: float=1.0,
-        higher_order_penalty: float=0.8,
-        sample_action: Optional[str]=None,
-        replacement_lambda: Optional[float]=None,
-        temperature: float=1.0,
-        cls_emb: Optional[Tensor] = None,
-    ) -> str:
-        inputs = self.tokenizer(sentence, return_tensors="pt")
-        covariance = self.get_token_covariance(inputs["input_ids"], inputs["attention_mask"], covariance_method)
-        if sample_span:
-            covariance = self.calculate_higher_order_span_score(
-                covariance, single_word_penalty, higher_order_penalty)
-        masked_sentence = self.get_masked_sentence(inputs["input_ids"], covariance, sample_span, sample_action, replacement_lambda)
-        sampled_sentence = self.sample_masked_sentence(masked_sentence, temperature, cls_emb=cls_emb)
-        return sampled_sentence
 
     def interpolate_states(
         self,
         src_embs: Tensor,
         tgt_embs: Tensor,
         mask_span: List[int],
-        aggregate_method: str="local",
-        interpolate_method: str="linear"
+        aggregate_method: str = "local",
+        interpolate_method: str = "linear",
     ):
         """
         interpolate between source and target embeddings (contextual or static)
@@ -292,69 +290,102 @@ class SentenceSampler:
         :return: embedding matrix same shape as src_emb
         """
         src_len = src_embs.shape[1] - 2
-        tgt_len = src_embs.shape[1] - 2
+        tgt_len = tgt_embs.shape[1] - 2
         new_src_embs = src_embs.clone()
-        for src_idx in range(mask_span[0], mask_span[1]+1):
+        for src_idx in range(mask_span[0], mask_span[1] + 1):
             tgt_idx = src_idx / src_len * tgt_len
             # TODO aggregation could also just sample an index
             if aggregate_method == "closest":
                 tgt_emb = tgt_embs[0, round(tgt_idx)]
             elif aggregate_method == "local":
-                tgt_idx_int = np.floor(tgt_idx)
+                tgt_idx_int = int(np.floor(tgt_idx))
                 frac = tgt_idx - tgt_idx_int
                 tgt_emb = self.interpolate(
-                    embs=tgt_embs[0, tgt_idx_int:tgt_idx_int+1],
+                    embs=tgt_embs[0, tgt_idx_int: tgt_idx_int + 2],
                     method=interpolate_method,
-                    weights=torch.tensor([1-frac, frac])
+                    weights=torch.tensor([1 - frac, frac]),
                 )
             elif aggregate_method == "global":
-                alpha = torch.tensor([np.abs(i-tgt_idx) for i in range(tgt_len)])
+                alpha = torch.tensor([np.abs(tgt_len- i + tgt_idx-1) for i in range(tgt_len)])
                 tgt_emb = self.interpolate(
-                    embs=tgt_embs[0, 1:-1],
-                    method=interpolate_method,
-                    weights=alpha
-                )
+                    embs=tgt_embs[0, 1:-1], method=interpolate_method, weights=alpha, sample_weight=True)
             else:
                 raise NotImplementedError(f"aggregation method={aggregate_method} not implemented")
             mix_emb = self.interpolate(
-                embs=torch.cat([src_embs[0, tgt_emb], tgt_emb]),
+                embs=torch.stack([src_embs[0, src_idx], tgt_emb]),
                 method=interpolate_method,
-                weights=torch.tensor([0.5, 0.5])
+                weights=torch.tensor([0.5, 0.5]),
+                sample_weight=True
             )
-            new_src_embs[src_idx] = mix_emb
+            new_src_embs[0, src_idx] = mix_emb
         return new_src_embs
 
-    def interpolate(self, embs: Tensor, method: str="linear", weights: Optional[Tensor]=None):
+    def interpolate(self, embs: Tensor, method: str = "linear", weights: Optional[Tensor] = None, sample_weight: bool=False):
         if weights is None:
-            if method == "polar":
-                # polar or dirchlet polar: https://aclanthology.org/2022.aacl-short.50.pdf
-                # here we treat weights as concentration alpha
-                weights = torch.tensor(dirichlet.rvs(weights, size=1))
-            else:
-                weights = torch.ones(len(embs))/len(embs)
-        assert sum(weights) == 1
+            weights = torch.ones(len(embs)) / len(embs)
+        if method == "polar" and sample_weight:
+            # polar or dirchlet polar: https://aclanthology.org/2022.aacl-short.50.pdf
+            # here we treat weights as concentration alpha
+            weights = torch.tensor(dirichlet.rvs(weights, size=1)).squeeze(0)
+
+        assert abs(weights.sum()-1) < 1e-3
         if method == "linear":
-            return embs*weights.sum(dim=0)
+            return torch.matmul(weights, embs)
         elif method == "exp":
-            return torch.prod(torch.pow(embs, weights), dim=0)
+            # return torch.prod(torch.pow(embs, weights.repeat(embs.shape[-1],1).T), dim=0)  # numerically unstable
+            return torch.exp(torch.matmul(weights, embs))
         elif method == "polar":
-            return embs*torch.sqrt(weights).sum(dim=0)
+            return torch.matmul(torch.sqrt(weights).float(), embs)
         else:
             raise NotImplementedError(f"interpolation method={method} not implemented")
 
+    def sample(
+        self,
+        sentence: str,
+        covariance_method: str = "random",
+        sample_span: bool = False,
+        single_word_penalty: float = 1.0,
+        higher_order_penalty: float = 0.8,
+        sample_action: Optional[str] = None,
+        replacement_lambda: Optional[float] = None,
+        temperature: float = 1.0,
+        tgt_embs: Optional[Tensor] = None,
+        tgt_logits: Optional[Tensor] = None,
+        fusion_aggregation: str = "closest",
+        fusion_interpolation: str = "linear",
+    ) -> str:
+        inputs = self.tokenizer(sentence, return_tensors="pt")
+        covariance = self.get_token_covariance(inputs["input_ids"], inputs["attention_mask"], covariance_method)
+        if sample_span:
+            covariance = self.calculate_higher_order_span_score(covariance, single_word_penalty, higher_order_penalty)
+        masked_sentence = self.get_masked_sentence(
+            inputs["input_ids"], covariance, sample_span, sample_action, replacement_lambda
+        )
+        sampled_sentence = self.sample_masked_sentence(
+            masked_sentence, temperature, tgt_embs, tgt_logits, fusion_aggregation, fusion_interpolation
+        )
+        return sampled_sentence
 
 
 class MetropolisHastingSentenceSampler:
     """
     Main class for Metropolis Hasting Sentence Sampling algorithm
     """
+
     def __init__(
         self,
         sampler_model_name: str,
         acceptor_semantic_model_name: str,
         acceptor_fluency_model_name: str,
-        method: str="random",
-        lambda_semantic: float=0.5
+        method: str = "word_random",
+        lambda_semantic: float = 0.5,
+        lambda_fluency: float=1.0,
+        target_fusion: Optional[str] = None,
+        fusion_aggregation: str = "closest",
+        fusion_interpolation: str = "linear",
+        annealing_rate: float = 0.01,
+        init_temp: float = 10.0,
+        min_temp: float = 2.0,
     ):
         """
 
@@ -374,12 +405,25 @@ class MetropolisHastingSentenceSampler:
                 distribution
             - span_mask_two: sample span with double pass perturbed masking covariance, sample target mask with poisson
                 distribution
-        :param lambda_semantic: proportion of importance given to semantics during acceptance calculation (vs. fluency)
+        :param lambda_semantic: exponent scalar to weigh semantic probability difference, higher it is acceptance is
+            more significantly influenced by semantic scores
+        :param lambda_fluency: exponent scalar to weigh average token probability difference, higher it is acceptance is
+            more significantly influenced by fluency scores
+        :param target_fusion: one of {None, emb, logit}
+            - None: no target fusion, samples are purely from language model based on source
+            - emb: fusion at last hidden state between source and target
+            - logit: fusion at logit level between source and target
+        :param fusion_aggregation: one of {closest, local, global}
+        :param fusion_interpolation: one of {linear, polar, exp}
+        :param annealing_rate:
+        :param init_temp:
+        :param min_temp:
         """
         self.sampler = SentenceSampler(sampler_model_name)
-        self.acceptor = ProposalAcceptor(acceptor_semantic_model_name, acceptor_fluency_model_name, lambda_semantic)
+        self.acceptor = ProposalAcceptor(
+            acceptor_semantic_model_name, acceptor_fluency_model_name, lambda_semantic, lambda_fluency)
         self.method = method
-        self.sample_kwargs = {}
+        self.sample_kwargs = {"fusion_aggregation": fusion_aggregation, "fusion_interpolation": fusion_interpolation}
         if method.startswith("word"):
             self.sample_kwargs["sample_span"] = False
         else:
@@ -389,6 +433,10 @@ class MetropolisHastingSentenceSampler:
         else:
             self.sample_kwargs["covariance_method"] = "_".join(method.split("_")[1:])
         self.ACTIONS = ["sub", "ins", "del"]
+        self.target_fusion = target_fusion
+        self.annealing_rate = annealing_rate
+        self.init_temp = init_temp
+        self.min_temp = min_temp
 
     def sample_action(self, target_sentence, cur_sentence) -> Tuple[Optional[str], Optional[float]]:
         if self.method.startswith("word"):
@@ -401,25 +449,35 @@ class MetropolisHastingSentenceSampler:
 
     def metropolis_hasting_sample(
         self,
-        source_sentence:str,
-        target_sentence:str,
-        steps: int=100,
-        annealing_rate: float = 0.01,
-        init_temp: float = 10.0,
-        min_temp: float = 2.0,
-        generator_influence: Optional[str]=None,
-    ) -> List[Dict]:
+        source_sentence: str,
+        target_sentence: str,
+        steps: int = 100,
+    ) -> pd.DataFrame:
         cur_sentence = source_sentence
-        temp = init_temp
+        temp = self.init_temp
         action, replacement_lbd = self.sample_action(target_sentence, source_sentence)
-        if generator_influence is not None:
+        if self.target_fusion is not None:
             tgt_inputs = self.sampler.tokenizer(target_sentence, return_tensors="pt")
-            self.sample_kwargs["cls_emb"] = self.sampler.model(output_hidden_states=True, **tgt_inputs).hidden_states[-1][0,0]  # CLS
-        else:
-            self.sample_kwargs["cls_emb"] = None
+            if self.target_fusion == "embs":
+                self.sample_kwargs["tgt_embs"] = self.sampler.model(
+                    output_hidden_states=True, **tgt_inputs
+                ).hidden_states[-1]
+            elif self.target_fusion == "logits":
+                self.sample_kwargs["tgt_logits"] = self.sampler.model(**tgt_inputs).logits
         self.acceptor.set_target_sentence(target_sentence)
         self.acceptor.get_acceptance(cur_sentence)
-        results = []
+        results = [{
+                        "sentences": cur_sentence,
+                        "proposal_sentence": "",
+                        "sem_logprob": self.acceptor.cur_sem_logprob.item(),
+                        "logprob": self.acceptor.cur_logprob.item(),
+                        "sem_sim": torch.exp(self.acceptor.cur_sem_logprob).item(),
+                        "avg_perplexity": torch.exp(-self.acceptor.cur_logprob).item(),
+                        "acceptance": 0.0,
+                        "action": action,
+                        "replacement_lbd": replacement_lbd,
+                        "temperature": temp,
+                    }]
         with torch.no_grad():
             for i in tqdm(range(steps)):
                 if len(cur_sentence) == 0:
@@ -435,51 +493,64 @@ class MetropolisHastingSentenceSampler:
                     self.acceptor.cur_logprob = logprob
                     cur_sentence = proposal_sentence
                 # update sampling hyperparameters
-                temp=np.maximum(temp*np.exp(-annealing_rate*i), min_temp)  # follow Gumbel-Softmax Annealing schedule https://blog.evjang.com/2016/11/tutorial-categorical-variational.html
+                # follow Gumbel-Softmax Annealing https://blog.evjang.com/2016/11/tutorial-categorical-variational.html
+                temp = np.maximum(
+                    temp * np.exp(-self.annealing_rate * i), self.min_temp
+                )
                 action, replacement_lbd = self.sample_action(target_sentence, cur_sentence)
                 # record metrics and results
-                results.append({"sentences": cur_sentence, "proposal_sentence": proposal_sentence,
-                                "sem_logprob": sem_logprob, "logprob": logprob, "acceptance": acceptance,
-                                "action": action, "replacement_lbd": replacement_lbd, "temperature": temp})
-        return results
+                results.append(
+                    {
+                        "sentences": cur_sentence,
+                        "proposal_sentence": proposal_sentence,
+                        "sem_logprob": sem_logprob.item(),
+                        "logprob": logprob.item(),
+                        "sem_sim": torch.exp(sem_logprob).item(),
+                        "avg_perplexity": torch.exp(-logprob).item(),
+                        "acceptance": acceptance.item(),
+                        "action": action,
+                        "replacement_lbd": replacement_lbd,
+                        "temperature": temp,
+                    }
+                )
+        df = pd.DataFrame(results)
+        return df
+
+    def post_sample_filter(
+        self,
+        sample_df: pd.DataFrame,
+        target_semantic_score: Optional[float]=None,
+        max_perplexity: float=10000.0,
+        remove_degenerates: bool=False,
+    ):
+        if remove_degenerates:
+            sample_df = sample_df.filter(lambda row: len(row["sentences"].split()) > 1)
+        target_semantic_score = max(sample_df.sem_sim) if target_semantic_score is None else target_semantic_score
+        if target_semantic_score < max(sample_df.sem_sim):
+            return None
+        idx = min(sample_df[sample_df.sem_sim >= target_semantic_score].index)
+        sample_df = sample_df.iloc[:idx]
+        sample_df = sample_df[sample_df.avg_perplexity < max_perplexity]
+        return sample_df
 
 
 if __name__ == "__main__":
-    # model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    # tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    # model = AutoModelForMaskedLM.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    # sentence = "I love New York"
-    # encoded_input = tokenizer(sentence, return_tensors="pt")
-    # with torch.no_grad():
-    #     # c1 = get_static_word_covariance(
-    #     #     encoded_input["input_ids"],
-    #     #     encoded_input["attention_mask"],
-    #     #     model
-    #     # )
-    #     # c2 = get_weighted_static_contextual_word_covariance(
-    #     #     encoded_input["input_ids"],
-    #     #     encoded_input["attention_mask"],
-    #     #     model
-    #     # )
-    #     # c3 = get_one_pass_perturbed_masking_word_covariance(
-    #     #     encoded_input["input_ids"], encoded_input["attention_mask"], model, tokenizer
-    #     # )
-    #     c4 = get_perturbed_masking_word_covariance(
-    #         encoded_input["input_ids"], encoded_input["attention_mask"], model, tokenizer, adjacent_only=True
-    #     )
     mhss = MetropolisHastingSentenceSampler(
-        sampler_model_name="distilbert-base-uncased",
-        acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2", #"sentence-transformers/all-MiniLM-L6-v2",
+        sampler_model_name="roberta-base",
+        acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",  # "sentence-transformers/all-MiniLM-L6-v2",
         acceptor_fluency_model_name="distilgpt2",
         method="word_random",
-        lambda_semantic=0.8
+        lambda_semantic=2.0,
+        lambda_fluency=0.1,
+        target_fusion="logits",
+        fusion_aggregation="local",
+        fusion_interpolation="linear",
+        init_temp=1.0,
+        min_temp=0.1,
     )
     mhss.metropolis_hasting_sample(
         source_sentence="I love New York",
         target_sentence="your cat looks ugly",
         steps=100,
-        init_temp=1.0,
-        min_temp=0.1,
-        generator_influence="cls"
     )
     pass
