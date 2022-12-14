@@ -77,7 +77,11 @@ class ProposalAcceptor:
     def get_acceptance(self, sentence: str) -> Optional[Tuple[Tensor, Tensor, float]]:
         sem_sim = self.calculate_semantic_similarity(sentence)
         sem_logprob = torch.log(sem_sim)
-        logprob = self.calculate_lm_logprob([sentence])
+        try:
+            logprob = self.calculate_lm_logprob([sentence])[0]
+        except Exception as e:
+            print(f"logprob calculation error: {e}.\nsentence: {sentence}")
+            logprob = torch.tensor(-float("inf"))
         if self.cur_logprob is None:
             self.cur_sem_logprob = sem_logprob
             self.cur_logprob = logprob
