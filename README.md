@@ -21,3 +21,7 @@ Sampling / Interpolating sentence using transformers with Metropolis-Hasting lik
   - works! with closest-polar + dirchlet sampling, quiet nice
   - global does not work as well, too much noise i think
   - local/closest + linear/polar works well
+
+
+## Intrinsic Evaluations:
+

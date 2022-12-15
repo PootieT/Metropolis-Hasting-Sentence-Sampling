@@ -305,6 +305,17 @@ class SentenceSampler:
                     method=interpolate_method,
                     weights=torch.tensor([1 - frac, frac]),
                 )
+            elif aggregate_method.startswith("local_"):
+                window_size = int(np.floor(int(aggregate_method.replace("local_",""))/2))
+                tgt_idx_int = int(np.floor(tgt_idx))
+                left, right = max(1, tgt_idx_int-window_size), min(tgt_idx_int + window_size + 1, tgt_len)
+                alpha = torch.tensor([np.abs(tgt_len - i + tgt_idx - 1) for i in range(left, right)])
+                tgt_emb = self.interpolate(
+                    embs=tgt_embs[0, left: right],
+                    method=interpolate_method,
+                    weights=alpha,
+                    sample_weight=True
+                )
             elif aggregate_method == "global":
                 alpha = torch.tensor([np.abs(tgt_len- i + tgt_idx-1) for i in range(tgt_len)])
                 tgt_emb = self.interpolate(
@@ -413,7 +424,8 @@ class MetropolisHastingSentenceSampler:
             - None: no target fusion, samples are purely from language model based on source
             - emb: fusion at last hidden state between source and target
             - logit: fusion at logit level between source and target
-        :param fusion_aggregation: one of {closest, local, global}
+        :param fusion_aggregation: one of {closest, local, global, local_x}, local_x (where x can be any integer) will
+            aggregate with neighborhood size of x (x/2 ahead and x/2 behind the word)
         :param fusion_interpolation: one of {linear, polar, exp}
         :param annealing_rate:
         :param init_temp:
@@ -520,7 +532,7 @@ class MetropolisHastingSentenceSampler:
         self,
         sample_df: pd.DataFrame,
         target_semantic_score: Optional[float]=None,
-        max_perplexity: float=10000.0,
+        max_perplexity: float=1e10,
         remove_degenerates: bool=False,
     ):
         if remove_degenerates:
