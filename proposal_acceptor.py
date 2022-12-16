@@ -15,6 +15,7 @@ class ProposalAcceptor:
         fluency_model_name: Optional[str] = None,
         lambda_semantic: float = 1.0,
         lambda_fluency: float = 1.0,
+        cuda: bool=False
     ):
         self.semantic_model = SentenceTransformer(semantic_model_name)
         self.ppl_tokenizer = AutoTokenizer.from_pretrained(fluency_model_name)
@@ -26,15 +27,18 @@ class ProposalAcceptor:
         self.lambda_fluency = lambda_fluency
         self.cur_sem_logprob = None
         self.cur_logprob = None
+        self.device = torch.device(torch.cuda.current_device()) if cuda else torch.device("cpu")
 
     def set_target_sentence(self, target_sentence: str):
-        self.tgt_sem_emb = self.semantic_model.encode(target_sentence)
+        self.tgt_sem_emb = self.semantic_model.encode(target_sentence, device=str(self.device))
+        # if self.device != torch.device("cpu"):
+        #     self.semantic_model.to("cpu")
 
     def calculate_semantic_similarity(self, sentence: str) -> Tensor:
         assert self.tgt_sem_emb is not None, "Run set_target_sentence first!"
         emb = self.semantic_model.encode(sentence)
         sem_sim = cosine_similarity(emb.reshape(1, -1), self.tgt_sem_emb.reshape(1, -1))[0][0]
-        return torch.tensor(sem_sim)
+        return torch.tensor(sem_sim, device=self.device)
 
     def calculate_lm_logprob(self, sentence: List[str], stride: int = 512) -> Tensor:
         # source: https://huggingface.co/docs/transformers/perplexity
@@ -42,6 +46,8 @@ class ProposalAcceptor:
         stride = min(max_length, stride)
 
         encodings = self.ppl_tokenizer(sentence, return_tensors="pt", padding="longest", truncation=True)
+        encodings["input_ids"] = encodings["input_ids"].to(self.device)
+        self.ppl_lm = self.ppl_lm.to(self.device)
 
         nlls = []
         # if sentences are longer than default window size
@@ -76,7 +82,10 @@ class ProposalAcceptor:
 
         sent_lens = encodings.attention_mask.sum(dim=1).to(self.ppl_lm.device)
         # ppl = torch.exp(torch.stack(nlls).sum(dim=0) / sent_lens)
-        return -torch.stack(nlls).sum(dim=0) / sent_lens
+        logp = -torch.stack(nlls).sum(dim=0) / sent_lens
+
+        # self.ppl_lm = self.ppl_lm.to("cpu")
+        return logp
 
     def get_acceptance(self, sentence: str) -> Optional[Tuple[Tensor, Tensor, float]]:
         sem_sim = self.calculate_semantic_similarity(sentence)
@@ -91,23 +100,27 @@ class ProposalAcceptor:
             self.cur_logprob = logprob
             return None
         else:
-            # accptance = self.lambda_semantic * torch.exp(
-            #     (sem_logprob - self.cur_sem_logprob) * self.hill_climb_scalar
-            # ) + (1 - self.lambda_semantic) * torch.exp((logprob - self.cur_logprob) * self.hill_climb_scalar)
             accptance = torch.exp(
                 (sem_logprob - self.cur_sem_logprob) * self.lambda_semantic +
                 (logprob - self.cur_logprob) * self.lambda_fluency)
             return sem_logprob, logprob, accptance
 
+    def clear_state(self):
+        self.cur_logprob = None
+        self.cur_sem_logprob = None
+        self.tgt_sem_emb = None
+
 
 if __name__ == "__main__":
     acceptor = ProposalAcceptor(
-        target_sentence="My cate is cute",
         semantic_model_name="sentence-transformers/all-MiniLM-L6-v2",
         fluency_model_name="distilgpt2",
+        cuda=True
     )
+    acceptor.set_target_sentence("My cate is cute")
     s1 = "new york city smells bad"
     s2 = "my dog is a cutie"
     acceptor.get_acceptance(s2)
     accpt1 = acceptor.get_acceptance(s1)
+    print(f"accpetance: {accpt1}")
     pass
