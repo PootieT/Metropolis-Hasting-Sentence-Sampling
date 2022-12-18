@@ -33,7 +33,7 @@ class SentenceSampler:
         return C[start:end, start:end]
 
     def get_static_word_covariance(self, input_ids: Tensor, attention_mask: Tensor):
-        static_embs = self.model.bert.embeddings(input_ids).squeeze(0)  # assume input is one sentence at a time
+        static_embs = self.model.base_model.embeddings(input_ids).squeeze(0)  # assume input is one sentence at a time
         cos_sim = 1 - COSINE(static_embs, static_embs)
 
         start = 1 if input_ids[0][0] == self.tokenizer.cls_token_id else 0
@@ -46,7 +46,7 @@ class SentenceSampler:
         attention_mask: Tensor,
         lambda_static: float = 0.5,
     ) -> Tensor:
-        static_embs = self.model.bert.embeddings(input_ids).squeeze(0)
+        static_embs = self.model.base_model.embeddings(input_ids).squeeze(0)
         contextual_embs = (
             self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
         )
@@ -63,22 +63,31 @@ class SentenceSampler:
         n = input_ids[0].shape[0]
         start = 1 if input_ids[0][0] == self.tokenizer.cls_token_id else 0
         end = len(input_ids[0]) - 1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids[0])
+        bs = 8
 
         contextual_embs = (
             self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1].squeeze(0)
         )
         covariance = torch.ones(n, n, device=self.device)
-        for i in range(start, end):
-            # TODO parallelize this
-            masked_input_ids = input_ids.clone()
-            masked_input_ids[0][i] = self.tokenizer.mask_token_id
-            masked_contextual_embs = (
-                self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
-                .hidden_states[-1]
-                .squeeze(0)
-            )
-            # larger impact a masked token has on rest of the token, the smaller the similarity
-            covariance[i, :] = 1 - nn.CosineSimilarity(dim=-1)(contextual_embs, masked_contextual_embs)
+        # for i in range(start, end):
+        #     # TODO parallelize this
+        #     masked_input_ids = input_ids.clone()
+        #     masked_input_ids[0][i] = self.tokenizer.mask_token_id
+        #     masked_contextual_embs = (
+        #         self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        #         .hidden_states[-1]
+        #         .squeeze(0)
+        #     )
+        #     # larger impact a masked token has on rest of the token, the smaller the similarity
+        #     covariance[i, :] = 1 - nn.CosineSimilarity(dim=-1)(contextual_embs, masked_contextual_embs)
+
+        input_ids_batch = input_ids.repeat([end-start, 1])
+        attention_mask_batch = attention_mask.repeat([end - start, 1])
+        input_ids_batch[range(start-1, end-1), range(start, end)] = self.tokenizer.mask_token_id
+        for i in range((end-start-1)//bs + 1):
+            masked_contextual_embs = self.model(
+                input_ids_batch[i*bs: i*bs+bs], attention_mask=attention_mask_batch[i*bs: i*bs+bs], output_hidden_states=True).hidden_states[-1]
+            covariance[i*bs+start: i*bs+start+masked_contextual_embs.shape[0], :] = 1 - nn.CosineSimilarity(dim=-1)(contextual_embs, masked_contextual_embs)
 
         ind = np.diag_indices(covariance.shape[0])
         covariance[ind[0], ind[1]] = 1
@@ -90,33 +99,69 @@ class SentenceSampler:
         n = input_ids[0].shape[0]
         start = 1 if input_ids[0][0] == self.tokenizer.cls_token_id else 0
         end = len(input_ids[0]) - 1 if input_ids[0][-1] == self.tokenizer.sep_token_id else len(input_ids[0])
+        bs = 8
 
         covariance = torch.ones(n, n, device=self.device)
-        for i in range(start, end):
-            # TODO parallelize this
-            masked_input_ids = input_ids.clone()
-            masked_input_ids[0][i] = self.tokenizer.mask_token_id
-            masked_contextual_embs = (
-                self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
-                .hidden_states[-1]
-                .squeeze(0)
-            )
-            j_range = [i - 1, i + 1] if adjacent_only else range(start, end)
-            for j in j_range:
-                if j != i:
-                    masked_2_input_ids = masked_input_ids.clone()
-                    masked_2_input_ids[0][j] = self.tokenizer.mask_token_id
-                    masked_2_contextual_embs = (
-                        self.model(masked_2_input_ids, attention_mask=attention_mask, output_hidden_states=True)
-                        .hidden_states[-1]
-                        .squeeze(0)
-                    )
-                    covariance[i, j] = 1 - nn.CosineSimilarity(dim=-1)(
-                        masked_contextual_embs[i], masked_2_contextual_embs[i]
-                    )
+        # for i in range(start, end):
+        #     # TODO parallelize this
+        #     masked_input_ids = input_ids.clone()
+        #     masked_input_ids[0][i] = self.tokenizer.mask_token_id
+        #     masked_contextual_embs = (
+        #         self.model(masked_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        #         .hidden_states[-1]
+        #         .squeeze(0)
+        #     )
+        #     j_range = [i - 1, i + 1] if adjacent_only else range(start, end)
+        #     for j in j_range:
+        #         if j != i:
+        #             masked_2_input_ids = masked_input_ids.clone()
+        #             masked_2_input_ids[0][j] = self.tokenizer.mask_token_id
+        #             masked_2_contextual_embs = (
+        #                 self.model(masked_2_input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        #                 .hidden_states[-1]
+        #                 .squeeze(0)
+        #             )
+        #             covariance[i, j] = 1 - nn.CosineSimilarity(dim=-1)(
+        #                 masked_contextual_embs[i], masked_2_contextual_embs[i]
+        #             )
+        #
+        #     if adjacent_only:  # sum diagonals as average of I(i, j-1) and I(i, j+1)
+        #         covariance[i, i] = (covariance[i, i - 1] + covariance[i, i + 1]) / 2
 
-            if adjacent_only:  # sum diagonals as average of I(i, j-1) and I(i, j+1)
-                covariance[i, i] = (covariance[i, i - 1] + covariance[i, i + 1]) / 2
+        # parallel version of adjacent only
+        input_ids_batch = input_ids.repeat([end - start, 1])
+        attention_mask_batch = attention_mask.repeat([end - start, 1])
+        input_ids_batch[range(start - 1, end - 1), range(start, end)] = self.tokenizer.mask_token_id
+        mask1_embs = []
+        for i in range((end - start - 1) // bs + 1):
+            masked_contextual_embs = self.model(
+                input_ids_batch[i * bs: i * bs + bs], attention_mask=attention_mask_batch[i * bs: i * bs + bs],
+                output_hidden_states=True).hidden_states[-1]
+            mask1_embs.append(masked_contextual_embs)
+        mask1_embs = torch.cat(mask1_embs, dim=0)
+
+        input_ids_batch = input_ids.repeat([(end - start) * 2, 1])
+        attention_mask_batch = attention_mask.repeat([(end - start) * 2, 1])
+        # in addition to mask the word, we mask word before in one example, and the word after in the second example
+        input_ids_batch[
+            range(0, (end - start) * 2), np.array([[i]*2 for i in range(start, end)]).reshape(-1).tolist()
+        ] = self.tokenizer.mask_token_id
+        input_ids_batch[range(0, (end - start) * 2, 2), range(start-1, end-1)] = self.tokenizer.mask_token_id
+        input_ids_batch[range(1, (end - start) * 2, 2), range(start + 1, end +1)] = self.tokenizer.mask_token_id
+        mask2_embs = []
+        for i in range(((end - start) * 2 - 1) // bs + 1):
+            masked_contextual_embs = self.model(
+                input_ids_batch[i * bs: i * bs + bs], attention_mask=attention_mask_batch[i * bs: i * bs + bs],
+                output_hidden_states=True).hidden_states[-1]
+            mask2_embs.append(masked_contextual_embs)
+        mask2_embs = torch.cat(mask2_embs, dim=0)
+
+        for i in range(0, end-start-1):
+            before_after_sim = 1 - nn.CosineSimilarity(dim=-1)(
+                mask1_embs[i,i+start], mask2_embs[i*2:i*2+2, i+start]
+            )
+            covariance[i+start, [i+start - 1, i+start + 1]] = before_after_sim
+            covariance[i+start, i+start] = before_after_sim.mean()
 
         return covariance[start:end, start:end]
 
@@ -129,20 +174,25 @@ class SentenceSampler:
 
         # set diagonal values for single word sampling
         single_word_penalty = torch.ones_like(C, device=self.device)
-        single_word_penalty -= 1 - torch.eye(n) * single_word_logit_penalty
+        single_word_penalty -= 1 - torch.eye(n, device=self.device) * single_word_logit_penalty
         C = C * single_word_penalty
 
         # dynamic algorithm to calculate average score of a span by averaging scores of all its sub-spans
         if n > 2:
             higher_order_ratio = torch.ones_like(C, device=self.device)
-            for i in range(2, n):
-                for j in range(n - 2, -1, -1):
-                    sub_span_coef = (i - 1 - j) * (i - j) / 2
+            for i in range(1, n):  # row, up to down
+                for j in range(i - 1, -1, -1):   # col, right to left, fill up lower-triangular entries
+                    # i-j is how many rows is the span off from diagonal, aka span length
+                    off_diag = i-j
+                    sub_span_coef = (off_diag) * (off_diag + 1) / 2
                     C[i, j] = C[i, j] + (C[i - 1, j] + C[i, j + 1]) * sub_span_coef
-                    C[i, j] /= sub_span_coef * 2 + 1
+                    if (off_diag)>=2:  # if it's more than 1 diagonal offset, we have to subtract overlapping region
+                        sub_sub_span_coef = (off_diag - 1) * (off_diag) / 2
+                        C[i, j] -= C[i-1, j+1] * sub_sub_span_coef
+                    C[i, j] /= (off_diag+1) * (off_diag + 2) / 2
 
                     # fill up higher order diagonal multiplier
-                    higher_order_ratio = higher_order_penalty ** (i - 1 - j)
+                    higher_order_ratio[i, j] = higher_order_penalty ** (off_diag)
 
             # apply higher order span penalty
             C = C * higher_order_ratio
@@ -205,12 +255,12 @@ class SentenceSampler:
         mask_token_id = self.tokenizer.mask_token_id
         if sample_span:
             indices = torch.tril_indices(n, n)
-            p_spans = torch.softmax(covariance[indices], dim=0)
+            p_spans = torch.softmax(covariance[indices[0], indices[1]], dim=0)
             span_idx = p_spans.multinomial(num_samples=1, replacement=True)
-            i = np.floor(np.sqrt(0.25 + 2 * span_idx) - 0.5)
+            i = torch.floor(torch.sqrt(0.25 + 2 * span_idx) - 0.5)
             triangular_num = i * (i + 1) / 2
             j = span_idx - triangular_num
-            mask_span = [min(i, j), max(i, j)]
+            mask_span = torch.cat([min(i, j), max(i, j)]).long()
         else:
             # sample only from diagonals
             p_tokens = torch.softmax(torch.diag(covariance), dim=0)
@@ -235,8 +285,12 @@ class SentenceSampler:
             else:
                 raise NotImplementedError
         else:  # sampling
-            sampled_len = poisson.rvs(scale=replacement_lambda)
-            input_ids = input_ids[: mask_span[0]] + [mask_token_id] * sampled_len + input_ids[mask_span[-1] + 1 :]
+            sampled_len = poisson.rvs(replacement_lambda)
+            input_ids = torch.cat([
+                            input_ids[: mask_span[0]],
+                            torch.tensor([mask_token_id] * sampled_len, device=self.device),
+                            input_ids[mask_span[-1] + 1 :]
+                        ]).long()
         return input_ids.unsqueeze(0)
 
     def sample_masked_sentence(
@@ -363,7 +417,7 @@ class SentenceSampler:
             # polar or dirchlet polar: https://aclanthology.org/2022.aacl-short.50.pdf
             # here we treat weights as concentration alpha
             weights = torch.tensor(dirichlet.rvs(weights, size=1), device=self.device).squeeze(0)
-        elif method == "linear" and abs(weights.sum()-1) >= 1e-3:
+        elif method in ["linear", "exp"] and abs(weights.sum()-1) >= 1e-3:
             weights = weights / weights.sum()
 
         assert abs(weights.sum()-1) < 1e-3
@@ -371,7 +425,7 @@ class SentenceSampler:
             return torch.matmul(weights.float(), embs)
         elif method == "exp":
             # return torch.prod(torch.pow(embs, weights.repeat(embs.shape[-1],1).T), dim=0)  # numerically unstable
-            return torch.exp(torch.matmul(weights, embs))
+            return torch.exp(torch.matmul(weights.float(), embs))
         elif method == "polar":
             return torch.matmul(torch.sqrt(weights).float(), embs)
         else:
@@ -393,7 +447,7 @@ class SentenceSampler:
         fusion_aggregation: str = "closest",
         fusion_interpolation: str = "linear",
     ) -> str:
-        inputs = self.tokenizer(sentence, return_tensors="pt")
+        inputs = self.tokenizer(sentence, return_tensors="pt", max_length=self.tokenizer.max_len_single_sentence)
         inputs["input_ids"] = inputs["input_ids"].to(self.device)
         inputs["attention_mask"] = inputs["attention_mask"].to(self.device)
         if self.model.device != self.device:
@@ -453,6 +507,7 @@ class MetropolisHastingSentenceSampler:
                 distribution
             - span_mask_one: sample span with one pass perturbed masking covariance, sample target mask with poisson
                 distribution
+            - span_pm:
             - span_mask_two: sample span with double pass perturbed masking covariance, sample target mask with poisson
                 distribution
             - None: probing mode, no sampling
@@ -483,7 +538,7 @@ class MetropolisHastingSentenceSampler:
                 self.sample_kwargs["sample_span"] = False
             else:
                 self.sample_kwargs["sample_span"] = True
-            if method == "word_pm":
+            if method in ["word_pm", "span_pm"]:
                 self.sample_kwargs["covariance_method"] = "mask_two_adjacent"
             else:
                 self.sample_kwargs["covariance_method"] = "_".join(method.split("_")[1:])
@@ -494,6 +549,7 @@ class MetropolisHastingSentenceSampler:
         self.min_temp = min_temp
         self.device = torch.device(torch.cuda.current_device()) if cuda else torch.device("cpu")
         self.sampler.device = self.device
+        self.sampler.model = self.sampler.model.to(self.device)
         self.acceptor.device = self.device
 
     def sample_action(self, target_sentence, cur_sentence) -> Tuple[Optional[str], Optional[float]]:
@@ -501,7 +557,7 @@ class MetropolisHastingSentenceSampler:
             action = random.choice(self.ACTIONS)
             replacement_lbd = None
         else:
-            action = random.choice(self.ACTIONS)
+            action = None
             replacement_lbd = len(target_sentence.split()) / len(cur_sentence.split())
         return action, replacement_lbd
 
@@ -579,6 +635,8 @@ class MetropolisHastingSentenceSampler:
 
     def prepare_fusion_signals(self, target_sentence, source_sentence):
         tgt_inputs = self.sampler.tokenizer(target_sentence, return_tensors="pt")
+        tgt_inputs["input_ids"] = tgt_inputs["input_ids"].to(self.device)
+        tgt_inputs["attention_mask"] = tgt_inputs["attention_mask"].to(self.device)
         if self.target_fusion == "embs":
             self.sample_kwargs["tgt_embs"] = self.sampler.model.base_model.embeddings(tgt_inputs["input_ids"])
         elif self.target_fusion == "hiddens":
@@ -625,16 +683,16 @@ if __name__ == "__main__":
         sampler_model_name="distilbert-base-uncased",
         acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",  # "sentence-transformers/all-MiniLM-L6-v2",
         acceptor_fluency_model_name="distilgpt2",
-        method="word_random",
+        method="word_pm",
         lambda_semantic=10.0,
         lambda_fluency=0.1,
-        target_fusion="hiddens",
-        fusion_aggregation="local",
-        fusion_interpolation="linear",
-        init_temp=10.0,
+        target_fusion="logits",
+        fusion_aggregation="closest",
+        fusion_interpolation="exp",
+        init_temp=1.0,
         annealing_rate=1e-4,
         min_temp=0.1,
-        cuda=False
+        cuda=True
     )
     mhss.metropolis_hasting_sample(
         source_sentence="I love New York",

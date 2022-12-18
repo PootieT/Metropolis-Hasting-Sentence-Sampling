@@ -240,49 +240,43 @@ if __name__ == "__main__":
     pair_df = draw_random_pairs(dataset, subset_per_class_count=5, max_len=512)
     sentence_pair = list(zip(pair_df["sent1"], pair_df["sent2"]))
 
-    # mhss = MetropolisHastingSentenceSampler(
-    #     sampler_model_name="distilbert-base-uncased",
-    #     acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",
-    #     acceptor_fluency_model_name="distilgpt2",
-    #     method="word_random",
-    #     lambda_semantic=10,
-    #     lambda_fluency=0.1,
-    #     target_fusion="embs",
-    #     fusion_aggregation="closest",
-    #     fusion_interpolation="exp",
-    #     init_temp=10.0,
-    #     annealing_rate=1e-4,
-    #     min_temp=0.1,
-    # )
-    # intrinsic_evaluation(sentence_pair, mhss, num_runs=5, exp_str="sem.1_ppl.1", visualize=False)
+    mhss = MetropolisHastingSentenceSampler(
+        sampler_model_name="distilbert-base-uncased",
+        acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",
+        acceptor_fluency_model_name="distilgpt2",
+        method="span_pm",
+        lambda_semantic=10,
+        lambda_fluency=10,
+        target_fusion="logits",
+        fusion_aggregation="closest",
+        fusion_interpolation="exp",
+        init_temp=1.0,
+        annealing_rate=1e-4,
+        min_temp=0.1,
+        cuda=True
+    )
+    intrinsic_evaluation(sentence_pair, mhss, num_runs=5, exp_str="span_pm_ppl10", visualize=False)
 
-    kwargs = {
-        "sampler_model_name": "distilbert-base-uncased",
-        "acceptor_semantic_model_name":"sentence-transformers/all-mpnet-base-v2",
-        "acceptor_fluency_model_name":"distilgpt2",
-        "method":"word_random",
-        "lambda_semantic": 10,
-        "lambda_fluency": 0.1,
-        "init_temp": 10.0,
-        "annealing_rate": 1e-4,
-        "min_temp": 0.1,
-    }
-    exp_kwargs_list = [
-        {"target_fusion": "embs", "fusion_aggregation": "closest", "fusion_interpolation": "linear"},
-        {"target_fusion": "embs", "fusion_aggregation": "closest", "fusion_interpolation": "exp"},
-        {"target_fusion": "embs", "fusion_aggregation": "local_5", "fusion_interpolation": "exp"},
-        {"target_fusion": "embs", "fusion_aggregation": "local_5", "fusion_interpolation": "polar"},
-        {"target_fusion": "hiddens", "fusion_aggregation": "closest", "fusion_interpolation": "linear"},
-        {"target_fusion": "hiddens", "fusion_aggregation": "closest", "fusion_interpolation": "exp"},
-        {"target_fusion": "hiddens", "fusion_aggregation": "local_5", "fusion_interpolation": "exp"},
-        {"target_fusion": "hiddens", "fusion_aggregation": "local_5", "fusion_interpolation": "polar"},
-    ]
-    for exp_kwargs in exp_kwargs_list:
-        kwargs.update(exp_kwargs)
-        mhss = MetropolisHastingSentenceSampler(**kwargs)
-        intrinsic_evaluation(
-            sentence_pair, mhss, num_runs=5,
-            exp_str=f"{kwargs['target_fusion']}_{kwargs['fusion_aggregation']}_{kwargs['fusion_interpolation']}",
-            visualize=False
-        )
-
+    # exp_kwargs_list = [
+    #     # {"target_fusion": "embs", "fusion_aggregation": "closest", "fusion_interpolation": "linear"},
+    #     # {"target_fusion": "embs", "fusion_aggregation": "closest", "fusion_interpolation": "exp"},
+    #     # {"target_fusion": "embs", "fusion_aggregation": "local_5", "fusion_interpolation": "exp"},
+    #     # {"target_fusion": "embs", "fusion_aggregation": "local_5", "fusion_interpolation": "polar"},
+    #     # {"target_fusion": "hiddens", "fusion_aggregation": "closest", "fusion_interpolation": "linear"},
+    #     {"target_fusion": "hiddens", "fusion_aggregation": "closest", "fusion_interpolation": "exp"},
+    #     {"target_fusion": "hiddens", "fusion_aggregation": "closest", "fusion_interpolation": "polar"},
+    #     {"target_fusion": "hiddens", "fusion_aggregation": "local_5", "fusion_interpolation": "exp"},
+    #     {"target_fusion": "hiddens", "fusion_aggregation": "local_5", "fusion_interpolation": "polar"},
+    #     {"target_fusion": "logits", "fusion_aggregation": "closest", "fusion_interpolation": "exp", "init_temp": 1.0},
+    #     {"init_temp": 20.0}
+    # ]
+    # for exp_kwargs in exp_kwargs_list:
+    #     kwargs.update(exp_kwargs)
+    #     mhss = MetropolisHastingSentenceSampler(**kwargs)
+    #     exp_str = f"{kwargs['target_fusion']}_{kwargs['fusion_aggregation']}_{kwargs['fusion_interpolation']}" \
+    #         if kwargs["init_temp"] == 10.0 else f"init_temp{kwargs['init_temp']}"
+    #     intrinsic_evaluation(
+    #         sentence_pair, mhss, num_runs=5,
+    #         exp_str=exp_str,
+    #         visualize=False
+    #     )
