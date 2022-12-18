@@ -1,33 +1,28 @@
+import ast
+import os.path
 import random
 from typing import *
 
-import datasets
 import numpy as np
 import pandas as pd
-import sklearn.metrics
-import torch
 import torch.nn as nn
 from sklearn.metrics import classification_report
-from torch.utils.data import DataLoader
-from transformers import Trainer, is_datasets_available
 
 from transformers import TrainingArguments, Trainer
 from transformers import AutoModelForSequenceClassification
 from transformers import AutoTokenizer
-from datasets import Dataset, load_metric
-
-import evaluate
-from transformers.trainer_utils import seed_worker
+from datasets import Dataset, load_dataset
 
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedTokenizerBase
 from typing import Union, Optional, List, Dict
 
 from transformers.utils import PaddingStrategy
 
-
+from experiments import augment_dataset, draw_random_pairs
 
 
 @dataclass
@@ -61,28 +56,36 @@ class CustomTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False):
         labels = inputs.get("labels")
+        del inputs["labels"]
         # forward pass
         outputs = model(**inputs)
         logits = outputs.get("logits")
-        # compute custom loss (suppose one has 3 labels with different weights)
-        # class_weight = 1. / torch.Tensor([328, 2496, 28]).to(model.device)
-        class_weight = (1-torch.Tensor([328, 2496, 28]).to(model.device)/(328+2496+28))
-        loss_fct = nn.CrossEntropyLoss(weight=class_weight)
-        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+
+        loss = -torch.sum(F.log_softmax(logits, dim=1) * labels, dim=1).mean()
         return (loss, outputs) if return_outputs else loss
 
 
-def load_train_datasets(model: str, exp_str: str) -> Dataset:
-    train_df = pd.read_csv(f"dump/{exp_str}/data_5.csv")
+def load_train_val_datasets(model: str, exp_str: str) -> Tuple[Dataset, Dataset]:
+    aug_data_path = f"dump/{exp_str}/aug.csv"
+    if not os.path.exists(aug_data_path):
+        dataset = load_dataset("imdb")["train"].to_pandas()
+        pair_df = draw_random_pairs(dataset, subset_per_class_count=5, max_len=512)
+        augment_dataset(pair_df, None, 1, aug_data_dir=f"./dump/{exp_str}")
+    train_df = pd.read_csv(aug_data_path)
     tokenizer = AutoTokenizer.from_pretrained(model)
     train_dataset = Dataset.from_pandas(train_df)
+    val_dataset = load_dataset("imdb")["test"]
 
     def tokenize_function(examples):
+        if isinstance(examples["label"][0], str):
+            examples["label"] = torch.tensor([ast.literal_eval(l) for l in examples["label"]])
+        elif isinstance(examples["label"][0], int):
+            examples["label"] = torch.tensor([[1 if i == ex else 0 for i in range(2)] for ex in examples["label"]])
         return tokenizer(examples["text"], padding="max_length", truncation=True)
 
     tokenized_train_datasets = train_dataset.map(tokenize_function, batched=True).shuffle(seed=42)
-
-    return tokenized_train_datasets
+    tokenized_val_datasets = val_dataset.map(tokenize_function, batched=True).shuffle(seed=42)
+    return tokenized_train_datasets, tokenized_val_datasets
 
 
 def custom_compute_metrics(eval_pred):
@@ -91,7 +94,7 @@ def custom_compute_metrics(eval_pred):
     # print("========= classification report =========")
     # print(classification_report(labels, predictions))
     # print("========= classification report end =========")
-    report = classification_report(labels, predictions, target_names=["neg", "neu", "pos"], output_dict=True)
+    report = classification_report(labels, predictions, target_names=["neg", "pos"], output_dict=True)
     report_flat = {}
     for k, v in report.items():
         if isinstance(v, dict):
@@ -101,24 +104,28 @@ def custom_compute_metrics(eval_pred):
 
 
 if __name__ == "__main__":
-    random.seed = 24
+    # random.seed = 24
     np.random.seed(24)
     torch.random.manual_seed(24)
     model_name = "bert-base-uncased"
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=3)
+    aug_data_dir = "init_temp1.0"
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
+    train_dataset, val_dataset = load_train_val_datasets(model_name, aug_data_dir)
     training_args = TrainingArguments(
-        output_dir="cardi-tweet",
+        output_dir=f"dump/{aug_data_dir}",
         evaluation_strategy="epoch",
+        eval_steps=10,
         num_train_epochs=30,
         do_train=True,
         do_eval=True,
         do_predict=False,
         learning_rate=3e-5,
-        lr_scheduler_type="fixed",
+        lr_scheduler_type="constant",
         per_device_train_batch_size=8,
         per_device_eval_batch_size=32,
         no_cuda=False,
-        logging_steps=1
+        logging_steps=1,
+        seed=24
     )
     trainer = CustomTrainer(
         model=model,
@@ -128,4 +135,5 @@ if __name__ == "__main__":
         compute_metrics=custom_compute_metrics,  # compute_metrics
         data_collator=OurDataCollatorWithPadding(tokenizer=AutoTokenizer.from_pretrained(model_name))
     )
-    trainer.train()
+    result = trainer.train()
+    pass
