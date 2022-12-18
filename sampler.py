@@ -325,6 +325,12 @@ class SentenceSampler:
                 attention_mask=torch.ones_like(input_ids, device=self.device),
                 output_hidden_states=True
             ).hidden_states[-1]
+            if self.method is None:
+                len_diff = token_hiddens.shape[1] - tgt_hiddens.shape[1]
+                if len_diff > 0:
+                    tgt_hiddens = torch.cat([tgt_hiddens, torch.zeros(1, len_diff, tgt_hiddens.shape[2])], dim=1)
+                else:
+                    token_hiddens = torch.cat([token_hiddens,  torch.zeros(1, -len_diff, tgt_hiddens.shape[2])], dim=1)
             token_hiddens = self.interpolate_states(
                 token_hiddens, tgt_hiddens, mask_span, fusion_aggregation, fusion_interpolation
             )
@@ -340,6 +346,12 @@ class SentenceSampler:
             ).logits
 
         if tgt_logits is not None:
+            if self.method is None:
+                len_diff = token_logits.shape[1] - tgt_logits.shape[1]
+                if len_diff > 0:
+                    tgt_logits = torch.cat([tgt_logits, torch.zeros(1, len_diff, tgt_logits.shape[2])], dim=1)
+                else:
+                    token_logits = torch.cat([token_logits, torch.zeros(1, -len_diff, tgt_logits.shape[2])], dim=1)
             token_logits = self.interpolate_states(
                 token_logits, tgt_logits, mask_span, fusion_aggregation, fusion_interpolation
             )
@@ -533,6 +545,7 @@ class MetropolisHastingSentenceSampler:
         self.sample_kwargs = {"fusion_aggregation": fusion_aggregation, "fusion_interpolation": fusion_interpolation}
         if method is None:
             self.sample_kwargs["covariance_method"] = None
+            self.sampler.method = None  # hack
         else:
             if method.startswith("word"):
                 self.sample_kwargs["sample_span"] = False
@@ -553,11 +566,12 @@ class MetropolisHastingSentenceSampler:
         self.acceptor.device = self.device
 
     def sample_action(self, target_sentence, cur_sentence) -> Tuple[Optional[str], Optional[float]]:
-        if self.method.startswith("word"):
+        action, replacement_lbd = None, None
+        if self.method is None:
+            action = "sub"
+        elif self.method.startswith("word"):
             action = random.choice(self.ACTIONS)
-            replacement_lbd = None
         else:
-            action = None
             replacement_lbd = len(target_sentence.split()) / len(cur_sentence.split())
         return action, replacement_lbd
 
@@ -650,8 +664,8 @@ class MetropolisHastingSentenceSampler:
             # if at probing mode, we are going to swap masked id in target embedding so it matches up with source, so
             # we can directly interpolate the two masked ids, as opposed to other neighboring tokens
             src_inputs = self.sampler.tokenizer(source_sentence, return_tensors="pt")
-            tgt_idx = np.argwhere((tgt_inputs["input_ids"] == self.tokenizer.mask_token_id))[1]
-            src_idx = np.argwhere((src_inputs["input_ids"] == self.tokenizer.mask_token_id))[1]
+            tgt_idx = np.argwhere((tgt_inputs["input_ids"] == self.sampler.tokenizer.mask_token_id))[1]
+            src_idx = np.argwhere((src_inputs["input_ids"] == self.sampler.tokenizer.mask_token_id))[1]
             if self.target_fusion == "hiddens":
                 self.sample_kwargs["tgt_hiddens"][0, src_idx] = self.sample_kwargs["tgt_hiddens"][0, tgt_idx]
             elif target_sentence == "logits":
