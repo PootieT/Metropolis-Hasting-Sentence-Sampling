@@ -33,27 +33,46 @@ def draw_random_pairs(
     return result_df
 
 
-def augment_dataset(pair_df:str, mh_sampler: MetropolisHastingSentenceSampler, num_aug:int=1, margin=0.03) -> pd.DataFrame:
-    if num_aug>1:
+def augment_dataset(
+    pair_df: pd.DataFrame,
+    mh_sampler: Optional[MetropolisHastingSentenceSampler],
+    num_aug:int=1,
+    margin=0.02,
+    aug_data_dir:Optional[str]=None
+) -> pd.DataFrame:
+    if num_aug > 1:
         pair_df = pd.concat([pair_df]*num_aug)
     pair_df["alpha"] = uniform.rvs(scale=0.5, size=len(pair_df))
-    num_class = pair_df.label1.max()
+    num_class = pair_df.label1.max()+1
     aug_df = []
+    if aug_data_dir is not None:
+        try:
+            exp_df = pd.concat([pd.read_csv(f"{aug_data_dir}/success.csv"), pd.read_csv(f"{aug_data_dir}/fail.csv")])
+        except:
+            exp_df = pd.read_csv(f"{aug_data_dir}/fail.csv")
     for i, row in pair_df.iterrows():
         sample_found = False
         while not sample_found:
-            max_steps = max(len(row["sent1"].split()), len(row["sent2"].split()))
-            sample_df = mh_sampler.metropolis_hasting_sample(row["sent1"], row["sent2"], max_steps, row["alpha"])
-            if sample_df.semantic_progress[-1] >= row["alpha"]:
-                # find all samples fall in +- 2% range, pick one with lowest perplexity
-                filt_df = sample_df[(sample_df.semantic_progress > row["alpha"]-margin) & (sample_df.semantic_progress < row["alpha"]+margin)]
-                aug_sentence = filt_df.sentences[filt_df["perplexity"].argmin()]
-                aug_label = list(range(num_class))
-                aug_label[row.label1], aug_label[row.label2] = 1-row["alpha"], row["alpha"]
-                aug_df.append({"text": aug_sentence, "label": aug_label})
-                aug_df.append({"text": row.sent1, "label": [1 if i==row.label1 else 0 for i in range(num_class)]})
-                sample_found = True
+            # max_steps = max(len(row["sent1"].split()), len(row["sent2"].split()))
+            # sample_df = mh_sampler.metropolis_hasting_sample(row["sent1"], row["sent2"], max_steps, row["alpha"])
+            sample_df = exp_df[exp_df.data_idx==i]
+            # if sample_df.semantic_progress.max() >= row["alpha"]-margin:
+            # find samples closest to target progress, search within +-% range, pick one with lowest perplexity
+            closest_progress = sample_df.iloc[np.argmin(np.abs(sample_df.semantic_progress-row["alpha"]))].semantic_progress
+            filt_df = sample_df[(sample_df.semantic_progress > closest_progress - margin) &
+                                (sample_df.semantic_progress < closest_progress + margin)]
+            # filt_df = sample_df[(sample_df.semantic_progress > row["alpha"]-margin) &
+            #                     (sample_df.semantic_progress < row["alpha"]+margin)]
+            aug_sentence = filt_df.sentences.values[filt_df["avg_perplexity"].argmin()]
+            aug_ppl = filt_df.avg_perplexity.values[filt_df["avg_perplexity"].argmin()]
+            aug_label = list(range(num_class))
+            aug_label[row.label1], aug_label[row.label2] = 1.0-row["alpha"], row["alpha"]
+            aug_df.append({"text": aug_sentence, "label": aug_label, "ppl": aug_ppl})
+            aug_df.append({"text": row.sent1, "label": [1 if i==row.label1 else 0 for i in range(num_class)]})
+            sample_found = True
     aug_df = pd.DataFrame(aug_df)
+    if aug_data_dir is not None:
+        aug_df.to_csv(f"{aug_data_dir}/aug.csv")
     return aug_df
 
 
@@ -202,8 +221,6 @@ def interpolation_evaluation():
         "acceptor_semantic_model_name": "sentence-transformers/all-mpnet-base-v2",
         "acceptor_fluency_model_name": "distilgpt2",
         "method": None,  # probing mode, no sampling, assumes input has mask already
-        "lambda_semantic": 10,
-        "lambda_fluency": 0.1,
         "init_temp": 1,
         "min_temp": 1,
         "fusion_aggregation": "closest"
@@ -216,19 +233,21 @@ def interpolation_evaluation():
         {"target_fusion": "logits", "fusion_interpolation": "exp"},
         {"target_fusion": "logits", "fusion_interpolation": "polar"},
     ]
-
-    for pair in pairs:
+    all_outputs = []
+    for i, pair in enumerate(pairs):
         for exp_kwargs in exp_kwargs_list:
             kwargs.update(exp_kwargs)
-            all_outputs = []
-            for i in range(10):
-                mh_sampler = MetropolisHastingSentenceSampler(**kwargs)
+            mh_sampler = MetropolisHastingSentenceSampler(**kwargs)
+            proposed_sentences = []
+            for _ in tqdm(range(10)):
                 result_df = mh_sampler.metropolis_hasting_sample(pair[0], pair[1], steps=1)
-                all_outputs.append({
-                    "proposal_sentence": result_df.iloc[1]["proposal_sentence"],
-                    "target_fusion": kwargs["target_fusion"],
-                    "fusion_interpolation": kwargs["fusion_interpolation"]
-                })
+                proposed_sentences.append(result_df.iloc[1]["proposal_sentence"])
+            all_outputs.append({
+                "data_idx": i,
+                "proposal_sentences": proposed_sentences,
+                "target_fusion": kwargs["target_fusion"],
+                "fusion_interpolation": kwargs["fusion_interpolation"]
+            })
     pd.DataFrame(all_outputs).to_csv("dump/interpolation_results.csv", index=False)
 
 
@@ -238,24 +257,28 @@ if __name__ == "__main__":
     torch.random.manual_seed(24)
     dataset = load_dataset("imdb")["train"].to_pandas()
     pair_df = draw_random_pairs(dataset, subset_per_class_count=5, max_len=512)
-    sentence_pair = list(zip(pair_df["sent1"], pair_df["sent2"]))
+    # pair_df = pair_df.drop(columns=["sent2", "label2"]).rename(columns={"sent1": "text", "label1": "label"})
+    # pd.to_csv("dump/imdb_5.csv", index=False)
+    # sentence_pair = list(zip(pair_df["sent1"], pair_df["sent2"]))
 
-    mhss = MetropolisHastingSentenceSampler(
-        sampler_model_name="distilbert-base-uncased",
-        acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",
-        acceptor_fluency_model_name="distilgpt2",
-        method="span_pm",
-        lambda_semantic=10,
-        lambda_fluency=10,
-        target_fusion="logits",
-        fusion_aggregation="closest",
-        fusion_interpolation="exp",
-        init_temp=1.0,
-        annealing_rate=1e-4,
-        min_temp=0.1,
-        cuda=True
-    )
-    intrinsic_evaluation(sentence_pair, mhss, num_runs=5, exp_str="span_pm_ppl10", visualize=False)
+    # mhss = MetropolisHastingSentenceSampler(
+    #     sampler_model_name="distilbert-base-uncased",
+    #     acceptor_semantic_model_name="sentence-transformers/all-mpnet-base-v2",
+    #     acceptor_fluency_model_name="distilgpt2",
+    #     method="span_pm",
+    #     lambda_semantic=10,
+    #     lambda_fluency=10,
+    #     target_fusion="logits",
+    #     fusion_aggregation="closest",
+    #     fusion_interpolation="exp",
+    #     init_temp=1.0,
+    #     annealing_rate=1e-4,
+    #     min_temp=0.1,
+    #     cuda=True
+    # )
+    # intrinsic_evaluation(sentence_pair, mhss, num_runs=5, exp_str="span_pm_ppl10", visualize=False)
+
+    # interpolation_evaluation()
 
     # exp_kwargs_list = [
     #     # {"target_fusion": "embs", "fusion_aggregation": "closest", "fusion_interpolation": "linear"},
@@ -280,3 +303,5 @@ if __name__ == "__main__":
     #         exp_str=exp_str,
     #         visualize=False
     #     )
+
+    augment_dataset(pair_df, None, 1, aug_data_dir="./dump/init_temp1.0")
