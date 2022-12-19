@@ -5,7 +5,6 @@ from typing import *
 
 import numpy as np
 import pandas as pd
-import torch.nn as nn
 from sklearn.metrics import classification_report
 
 from transformers import TrainingArguments, Trainer
@@ -21,6 +20,7 @@ from transformers import PreTrainedTokenizerBase
 from typing import Union, Optional, List, Dict
 
 from transformers.utils import PaddingStrategy
+import wandb
 
 from experiments import augment_dataset, draw_random_pairs
 
@@ -94,34 +94,36 @@ def custom_compute_metrics(eval_pred):
     # print("========= classification report =========")
     # print(classification_report(labels, predictions))
     # print("========= classification report end =========")
-    report = classification_report(labels, predictions, target_names=["neg", "pos"], output_dict=True)
+    report = classification_report(labels.argmax(1), predictions, target_names=["neg", "pos"], output_dict=True)
     report_flat = {}
     for k, v in report.items():
         if isinstance(v, dict):
             for vk, vv in v.items():
                 report_flat[f"{k}_{vk}".replace(' ', '_')] = vv
+    report_flat["accuracy"] = sum(labels.argmax(1)== predictions)/len(predictions)
     return report_flat
 
 
-def finetune_model(model_name, aug_data_dir, seed):
+def finetune_model(model_name, aug_data_dir, seed, bs: 2):
     model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
     train_dataset, val_dataset = load_train_val_datasets(model_name, aug_data_dir)
     training_args = TrainingArguments(
         output_dir=f"dump/{aug_data_dir}",
         evaluation_strategy="epoch",
-        eval_delay=30,
+        eval_delay=29,
         num_train_epochs=30,
         do_train=True,
         do_eval=True,
         do_predict=False,
         learning_rate=3e-5,
         lr_scheduler_type="constant",
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=bs,
         per_device_eval_batch_size=32,
+        gradient_accumulation_steps=int(8/bs),
         no_cuda=False,
         logging_steps=1,
         seed=seed,
-        run_name=f"{aug_data_dir}_seed"
+        run_name=f"{aug_data_dir}_seed{seed}"
     )
     trainer = CustomTrainer(
         model=model,
@@ -132,19 +134,25 @@ def finetune_model(model_name, aug_data_dir, seed):
         data_collator=OurDataCollatorWithPadding(tokenizer=AutoTokenizer.from_pretrained(model_name))
     )
     result = trainer.train()
+    wandb.finish()
     return result
 
 
 if __name__ == "__main__":
-    # random.seed = 24
+    # random.seed(24)
     np.random.seed(24)
     torch.random.manual_seed(24)
-    model_name = "bert-base-uncased"
-    aug_data_dir_list = ["baseline", "hiddens_closest_linear", "init_temp1.0", "word_pm", "span_static", "span_mask_one", "span_pm_ppl10"]
+    model_name = "bert-base-uncased"  # "baseline","no_fusion", "hiddens_closest_linear" "init_temp1.0" "word_pm" "span_static" "span_mask_one"
+    aug_data_dir_list = [ "span_pm"] #   , ,  ,  , , "span_pm_ppl10"
     for aug_dir in aug_data_dir_list:
         print(f" =========== start finetuning {aug_dir} ==========")
-        for seed in [11, 12, 13]:
+        for seed in [ 11,12,13, 22,25]: # 11,12,13, 22,25
             print(f"++++++++ seed {seed} ++++++++")
-            res = finetune_model(model_name, aug_dir, seed)
-            print(res)
-    pass
+            try:
+                res = finetune_model(model_name, aug_dir, seed, 2)
+                print(res)
+            except:
+                print("exception occured")
+                res = finetune_model(model_name, aug_dir, seed, 1)
+                print(res)
+

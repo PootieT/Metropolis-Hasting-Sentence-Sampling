@@ -5,7 +5,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 from torch import Tensor
 from torch.nn import CrossEntropyLoss
-from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 class ProposalAcceptor:

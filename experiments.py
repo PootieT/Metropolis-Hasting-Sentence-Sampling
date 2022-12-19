@@ -2,9 +2,7 @@ import os
 import time
 from typing import *
 import random
-import numpy as np
-import pandas as pd
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 import seaborn as sns
 import matplotlib.pyplot as plt
 
@@ -43,6 +41,7 @@ def augment_dataset(
     if num_aug > 1:
         pair_df = pd.concat([pair_df]*num_aug)
     pair_df["alpha"] = uniform.rvs(scale=0.5, size=len(pair_df))
+    # pair_df["alpha"] = 0.33
     num_class = pair_df.label1.max()+1
     aug_df = []
     if aug_data_dir is not None:
@@ -79,6 +78,55 @@ def augment_dataset(
 def plot_data(exp_str:str):
     df = pd.read_csv(f"dump/{exp_str}/success.csv")
     visualize_sampling_runs(df, exp_str)
+
+
+def plot_multiple_trials(exp_strs: List[str]):
+    dir2exp = {
+        "no_fusion": "no fusion",
+        "embs_closest_linear": "emb",
+        "hiddens_closest_linear": "hidden",
+        "init_temp1.0": "logit",
+        "word_pm": "word-pm",
+        "span_static": "span-static",
+        "span_mask_one": "span-one",
+        "span_pm": "span-pm",
+        "span_pm_ppl10": "span-pm+"
+    }
+
+    sample_df = pd.DataFrame()
+    for exp_str in exp_strs:
+        try:
+            exp_df = pd.concat([pd.read_csv(f"dump/{exp_str}/success.csv"),
+                                pd.read_csv(f"dump/{exp_str}/fail.csv")])
+        except:
+            exp_df = pd.read_csv(f"dump/{exp_str}/fail.csv")
+        exp_df["exp"] = dir2exp[exp_str]
+        sample_df = pd.concat([sample_df, exp_df])
+
+
+
+    # semantic score trajectory
+    plt.figure()
+    sample_df = sample_df.rename(columns={"semantic_progress": "semantic similarity to target (normalized)"})
+    sns.lineplot(data=sample_df, x="step", y="semantic similarity to target (normalized)", hue="exp")
+    plt.title("Normalized Semantic Similarity to Target Sentence over Sampling Steps")
+    plt.savefig(f"dump/exp_trajectory_semantics.png")
+
+    # perplexity score trajectory
+    plt.figure()
+    sample_df = sample_df.rename(columns={"avg_perplexity": "perplexity"})
+    sns.lineplot(data=sample_df, x="step", y="perplexity", hue="exp")
+    plt.title("Perplexity over Sampling Steps")
+    plt.savefig(f"dump/exp_trajectory_perplexity.png")
+
+    # acceptance score trajectory
+    plt.figure()
+    sns.lineplot(data=sample_df, x="step", y="acceptance", hue="exp")
+    reject_df = sample_df[sample_df.sentences!=sample_df.proposal_sentence]
+    plt.scatter(reject_df.step, reject_df.acceptance, color="r", marker="x")
+    plt.title("Acceptance over Sampling Steps")
+    plt.savefig(f"dump/exp_trajectory_acceptance.png")
+    pass
 
 
 def visualize_sampling_runs(sample_df: pd.DataFrame, exp_str: str="baseline"):
@@ -195,14 +243,6 @@ def intrinsic_evaluation(
         visualize_sampling_runs(success_df, exp_str)
 
 
-def extrinsic_evaluation():
-    """
-    Given few shot examples, perform mixup sampling, and finetune a classifier
-    on top. 
-    """
-    pass
-
-
 def interpolation_evaluation():
     """ Are pretrained model's embedding linearly interpretable? """
     print(f"============ starting interpolation experiment ===========")
@@ -252,7 +292,7 @@ def interpolation_evaluation():
 
 
 if __name__ == "__main__":
-    random.seed = 24
+    random.seed(24)
     np.random.seed(24)
     torch.random.manual_seed(24)
     dataset = load_dataset("imdb")["train"].to_pandas()
@@ -303,5 +343,13 @@ if __name__ == "__main__":
     #         exp_str=exp_str,
     #         visualize=False
     #     )
+    exp_list=["no_fusion", "embs_closest_linear", "hiddens_closest_linear", "init_temp1.0",
+        "word_pm", "span_static", "span_mask_one", "span_pm",
+        "span_pm_ppl10"]
+    for exp_str in exp_list:
+        augment_dataset(pair_df, None, 1, aug_data_dir=f"./dump/{exp_str}") #span_pm_ppl10
 
-    augment_dataset(pair_df, None, 1, aug_data_dir="./dump/init_temp1.0")
+    # plot_multiple_trials([
+    #     "no_fusion", "embs_closest_linear", "hiddens_closest_linear", "init_temp1.0",
+    #     "word_pm", "span_static", "span_mask_one", "span_pm",
+    #     "span_pm_ppl10"])

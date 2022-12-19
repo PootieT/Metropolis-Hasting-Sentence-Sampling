@@ -1,10 +1,8 @@
-from enum import Enum
 from typing import *
 import random
 
 import numpy as np
 import pandas as pd
-import scipy.special
 import torch
 import torch.nn as nn
 from scipy.stats import poisson, uniform, dirichlet
