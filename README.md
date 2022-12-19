@@ -48,11 +48,15 @@ intrinsic_evaluation(sentence_pair, mhss, num_runs=5, exp_str="my_experiment_tri
 This samples 5 data points from IMDB train dataset for each class, and performs 5 runs of sampling experiments for each pair
 Each experiment like this can run from 2.5 hrs to 5 hrs long. For span based methods, especially `pm`, 
 `mask-one` (or `one`), a GPU is needed to parallelize the model calls. Each run outputs results in `dump/[EXP_STR]`
-where you can specific what `EXP_STR` is.
+where you can specific what `EXP_STR` is. `dump/init_temp1.0` is an example output directory, and `dump/baseline` 
+contains original sentences used in all interpolation experiments.
+
+
 2. After intrinsic evaluations, then I can do visualizations if I want on the trial by calling:
 ```python
 plot_data("my_experiment_trial")
 ```
+
 3. Before extrinsic evaluation, make sure to call generate augmentation data first with set seed in `experiments.py`:
 ```python
 augment_dataset(pair_df, None, 1, aug_data_dir=f"./dump/my_experiment_trial")

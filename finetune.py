@@ -142,8 +142,8 @@ if __name__ == "__main__":
     # random.seed(24)
     np.random.seed(24)
     torch.random.manual_seed(24)
-    model_name = "bert-base-uncased"  # "baseline","no_fusion", "hiddens_closest_linear" "init_temp1.0" "word_pm" "span_static" "span_mask_one"
-    aug_data_dir_list = [ "span_pm"] #   , ,  ,  , , "span_pm_ppl10"
+    model_name = "bert-base-uncased"  # "baseline","no_fusion", "hiddens_closest_linear" "init_temp1.0" "word_pm" "span_static" "span_mask_one" "span_pm"
+    aug_data_dir_list = ["span_pm_ppl10" ] #   , ,  ,  , ,
     for aug_dir in aug_data_dir_list:
         print(f" =========== start finetuning {aug_dir} ==========")
         for seed in [ 11,12,13, 22,25]: # 11,12,13, 22,25
